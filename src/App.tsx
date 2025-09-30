@@ -12,15 +12,23 @@ interface CSVRow {
 }
 
 interface ProcessedResult {
-  tweetId: string;
+  tweetId?: string;
   replyText: string;
   originalTweetText: string;
   score: number;
-  ranking: number;
+  ranking?: number;
+  batchIndex?: number;
+  itemIndex?: number;
 }
 
 interface WebhookResponse {
+  totalProcessed?: number;
   results?: ProcessedResult[];
+  summary?: {
+    averageScore: number;
+    highestScore: number;
+    lowestScore: number;
+  };
   data?: ProcessedResult[];
   [key: string]: any;
 }
@@ -29,6 +37,12 @@ const TweetRankerApp: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [results, setResults] = useState<ProcessedResult[] | null>(null);
+  const [summary, setSummary] = useState<{
+    averageScore: number;
+    highestScore: number;
+    lowestScore: number;
+    totalProcessed: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
 
@@ -42,6 +56,7 @@ const TweetRankerApp: React.FC = () => {
       setFile(selectedFile);
       setError(null);
       setResults(null);
+      setSummary(null);
     } else {
       setError("Please select a valid CSV file");
       setFile(null);
@@ -71,6 +86,7 @@ const TweetRankerApp: React.FC = () => {
     setLoading(true);
     setError(null);
     setProgress(0);
+    setSummary(null);
 
     try {
       // Read CSV file
@@ -101,17 +117,46 @@ const TweetRankerApp: React.FC = () => {
         throw new Error(`Server error: ${response.status}`);
       }
 
-      const data: WebhookResponse = await response.json();
+      const data: WebhookResponse | WebhookResponse[] = await response.json();
       console.log("Received response:", data); // Debug log
       setProgress(100);
 
-      // Handle different response formats
-      const processedResults =
-        data.results ||
-        data.data ||
-        data.items ||
-        (Array.isArray(data) ? data : []);
-      setResults(processedResults as ProcessedResult[]);
+      // Handle the response format - it comes as an array with one object
+      let processedResults: ProcessedResult[] = [];
+      
+      if (Array.isArray(data) && data.length > 0) {
+        // Data is wrapped in an array
+        const responseData = data[0];
+        processedResults = responseData.results || [];
+        
+        // Set summary information if available
+        if (responseData.summary) {
+          setSummary({
+            ...responseData.summary,
+            totalProcessed: responseData.totalProcessed || processedResults.length
+          });
+        }
+      } else if (data && typeof data === 'object' && 'results' in data) {
+        // Data is a direct object
+        processedResults = data.results || [];
+        if (data.summary) {
+          setSummary({
+            ...data.summary,
+            totalProcessed: data.totalProcessed || processedResults.length
+          });
+        }
+      }
+
+      // Add missing tweetId if not present and add ranking based on score
+      const resultsWithRanking = processedResults
+        .map(result => ({
+          ...result,
+          tweetId: result.tweetId || `tweet_${result.itemIndex}`, // Fallback tweetId
+          ranking: result.score // Use score as ranking
+        }))
+        .sort((a, b) => b.score - a.score); // Sort by score descending
+
+      setResults(resultsWithRanking);
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "An unknown error occurred";
@@ -141,10 +186,19 @@ const TweetRankerApp: React.FC = () => {
   const convertToCSV = (data: ProcessedResult[]): string => {
     if (!Array.isArray(data) || data.length === 0) return "";
 
-    const headers = Object.keys(data[0]);
-    const rows = data.map((row) =>
+    // Define the headers we want in the CSV
+    const headers = ["tweetId", "replyText", "originalTweetText", "score", "ranking"];
+    const rows = data.map((row, index) =>
       headers
-        .map((header) => `"${row[header as keyof ProcessedResult] || ""}"`)
+        .map((header) => {
+          let value: string | number | undefined;
+          if (header === "tweetId") {
+            value = row.tweetId || `tweet_${row.itemIndex || index}`;
+          } else {
+            value = row[header as keyof ProcessedResult];
+          }
+          return `"${value || ""}"`;
+        })
         .join(",")
     );
 
@@ -263,6 +317,28 @@ const TweetRankerApp: React.FC = () => {
               </button>
             </div>
 
+            {/* Summary Statistics */}
+            {summary && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-blue-50 rounded-lg p-4 text-center">
+                  <p className="text-sm font-medium text-blue-600">Total Processed</p>
+                  <p className="text-2xl font-bold text-blue-800">{summary.totalProcessed}</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-4 text-center">
+                  <p className="text-sm font-medium text-green-600">Highest Score</p>
+                  <p className="text-2xl font-bold text-green-800">{summary.highestScore}/10</p>
+                </div>
+                <div className="bg-yellow-50 rounded-lg p-4 text-center">
+                  <p className="text-sm font-medium text-yellow-600">Average Score</p>
+                  <p className="text-2xl font-bold text-yellow-800">{summary.averageScore.toFixed(1)}/10</p>
+                </div>
+                <div className="bg-red-50 rounded-lg p-4 text-center">
+                  <p className="text-sm font-medium text-red-600">Lowest Score</p>
+                  <p className="text-2xl font-bold text-red-800">{summary.lowestScore}/10</p>
+                </div>
+              </div>
+            )}
+
             {/* Results Preview */}
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -285,14 +361,36 @@ const TweetRankerApp: React.FC = () => {
                       key={idx}
                       className="border-b border-gray-100 hover:bg-gray-50"
                     >
-                      <td className="py-3 px-4 text-gray-600">{row.tweetId}</td>
+                      <td className="py-3 px-4 text-gray-600">{row.tweetId || `Item ${row.itemIndex || idx}`}</td>
                       <td className="py-3 px-4 text-gray-800 max-w-md truncate">
                         {row.replyText}
                       </td>
                       <td className="py-3 px-4">
-                        <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-indigo-100 text-indigo-800">
-                          {row.score || row.ranking || "N/A"}/10
-                        </span>
+                        {(() => {
+                          const score = row.score || row.ranking || 0;
+                          let bgColor = "bg-gray-100";
+                          let textColor = "text-gray-800";
+                          
+                          if (score >= 8) {
+                            bgColor = "bg-green-100";
+                            textColor = "text-green-800";
+                          } else if (score >= 6) {
+                            bgColor = "bg-blue-100";
+                            textColor = "text-blue-800";
+                          } else if (score >= 4) {
+                            bgColor = "bg-yellow-100";
+                            textColor = "text-yellow-800";
+                          } else if (score >= 1) {
+                            bgColor = "bg-red-100";
+                            textColor = "text-red-800";
+                          }
+                          
+                          return (
+                            <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${bgColor} ${textColor}`}>
+                              {score}/10
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   ))}
