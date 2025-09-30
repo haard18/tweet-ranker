@@ -48,7 +48,7 @@ const TweetRankerApp: React.FC = () => {
 
   // Replace with your actual n8n webhook URL
   const WEBHOOK_URL: string =
-    "https://n8n.srv899043.hstgr.cloud/webhook/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
+    "https://n8n.srv899043.hstgr.cloud/webhook-test/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const selectedFile = e.target.files?.[0];
