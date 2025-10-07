@@ -55,11 +55,11 @@ const TweetRankerApp: React.FC = () => {
 
   // Replace with your actual n8n webhook URLs
   const WEBHOOK_URL: string =
-    "http://n8n-ywk0kkowswggwskcoo8cwgwk.62.169.28.11.sslip.io/webhook/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
+    "http://n8n-w0wc4soccw4sgg4ogkk48w48.62.169.28.11.sslip.io/webhook/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
   
   // Add your results endpoint URL here
   const RESULTS_URL: string = 
-    "http://n8n-ywk0kkowswggwskcoo8cwgwk.62.169.28.11.sslip.io/webhook/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
+    "http://n8n-w0wc4soccw4sgg4ogkk48w48.62.169.28.11.sslip.io/webhook/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
 
   // Cleanup polling on unmount
   useEffect(() => {
