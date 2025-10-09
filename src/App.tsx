@@ -55,11 +55,11 @@ const TweetRankerApp: React.FC = () => {
 
   // Replace with your actual n8n webhook URLs
   const WEBHOOK_URL: string =
-    "http://n8n-w0wc4soccw4sgg4ogkk48w48.62.169.28.11.sslip.io/webhook/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
-  
+    "https://n8n.elcarainternal.lol/webhook/c981f5ea-99ce-4a36-9f8a-e4eb63c98d27";
+
   // Add your results endpoint URL here
-  const RESULTS_URL: string = 
-    "http://n8n-w0wc4soccw4sgg4ogkk48w48.62.169.28.11.sslip.io/webhook/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
+  const RESULTS_URL: string =
+    "https://n8n.elcarainternal.lol/webhook-test/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -75,7 +75,7 @@ const TweetRankerApp: React.FC = () => {
     if (selectedFile && selectedFile.type === "text/csv") {
       // Stop any ongoing polling
       stopPolling();
-      
+
       setFile(selectedFile);
       setError(null);
       setResults(null);
@@ -110,7 +110,7 @@ const TweetRankerApp: React.FC = () => {
 
     // Stop any ongoing polling
     stopPolling();
-    
+
     setLoading(true);
     setError(null);
     setProgress(0);
@@ -148,7 +148,7 @@ const TweetRankerApp: React.FC = () => {
 
       const data: JobResponse = await response.json();
       console.log("Received job response:", data); // Debug log
-      
+
       if (data.jobId) {
         setJobId(data.jobId);
         setJobSubmitted(true);
@@ -156,7 +156,6 @@ const TweetRankerApp: React.FC = () => {
       } else {
         throw new Error("No job ID received from server");
       }
-
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "An unknown error occurred";
@@ -179,7 +178,9 @@ const TweetRankerApp: React.FC = () => {
     setFetchingResults(false);
   };
 
-  const checkResults = async (isAutoPolling: boolean = false): Promise<boolean> => {
+  const checkResults = async (
+    isAutoPolling: boolean = false
+  ): Promise<boolean> => {
     if (!jobId) {
       setError("No job ID available");
       return false;
@@ -210,14 +211,34 @@ const TweetRankerApp: React.FC = () => {
         throw new Error(`Server error: ${response.status}`);
       }
 
-      const rawData = await response.json();
+      // Check if response has content before trying to parse JSON
+      const responseText = await response.text();
+      if (!responseText || responseText.trim() === "") {
+        console.log("Empty response, continuing to poll...");
+        if (!isAutoPolling) {
+          startPolling();
+        }
+        return false; // No data yet, continue polling
+      }
+
+      let rawData;
+      try {
+        rawData = JSON.parse(responseText);
+      } catch (parseError) {
+        console.log("Failed to parse JSON, response text:", responseText);
+        if (!isAutoPolling) {
+          startPolling();
+        }
+        return false; // Invalid JSON, continue polling
+      }
+
       console.log("Received results:", rawData); // Debug log
 
       // Handle array wrapper - the response comes as an array with one object
       let data: WebhookResponse;
       if (Array.isArray(rawData) && rawData.length > 0) {
         data = rawData[0];
-      } else if (rawData && typeof rawData === 'object') {
+      } else if (rawData && typeof rawData === "object") {
         data = rawData;
       } else {
         console.log("Unexpected response format:", rawData);
@@ -236,24 +257,34 @@ const TweetRankerApp: React.FC = () => {
       if (data.status === "done") {
         if (data.results && data.results.length > 0) {
           // Process results
-          const processedResults = data.results.map(result => ({
-            ...result,
-            ranking: typeof result.score === 'string' ? parseInt(result.score) : result.score
-          })).sort((a, b) => {
-            const scoreA = typeof a.score === 'string' ? parseInt(a.score) : a.score;
-            const scoreB = typeof b.score === 'string' ? parseInt(b.score) : b.score;
-            return scoreB - scoreA;
-          });
+          const processedResults = data.results
+            .map((result) => ({
+              ...result,
+              ranking:
+                typeof result.score === "string"
+                  ? parseInt(result.score)
+                  : result.score,
+            }))
+            .sort((a, b) => {
+              const scoreA =
+                typeof a.score === "string" ? parseInt(a.score) : a.score;
+              const scoreB =
+                typeof b.score === "string" ? parseInt(b.score) : b.score;
+              return scoreB - scoreA;
+            });
 
           setResults(processedResults);
-          
+
           // Calculate summary
-          const scores = processedResults.map(r => typeof r.score === 'string' ? parseInt(r.score) : r.score);
+          const scores = processedResults.map((r) =>
+            typeof r.score === "string" ? parseInt(r.score) : r.score
+          );
           setSummary({
             totalProcessed: processedResults.length,
-            averageScore: scores.reduce((sum, score) => sum + score, 0) / scores.length,
+            averageScore:
+              scores.reduce((sum, score) => sum + score, 0) / scores.length,
             highestScore: Math.max(...scores),
-            lowestScore: Math.min(...scores)
+            lowestScore: Math.min(...scores),
           });
 
           // Stop polling if it was running
@@ -271,11 +302,14 @@ const TweetRankerApp: React.FC = () => {
       }
 
       return false;
-
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred";
+      const errorMessage =
+        err instanceof Error ? err.message : "An unknown error occurred";
       // Only show errors for non-polling requests or actual server errors
-      if (!isAutoPolling || !(err instanceof Error && err.message.includes("Results not ready"))) {
+      if (
+        !isAutoPolling ||
+        !(err instanceof Error && err.message.includes("Results not ready"))
+      ) {
         setError(errorMessage);
       }
       console.error("Error fetching results:", err);
@@ -327,15 +361,27 @@ const TweetRankerApp: React.FC = () => {
   const convertToCSV = (data: ProcessedResult[]): string => {
     if (!Array.isArray(data) || data.length === 0) return "";
 
-    // Define the headers we want in the CSV
-    const headers = ["id", "tweetId", "replyText", "originalTweetText", "score", "ranking", "jobid", "tweetlink"];
+    const headers = [
+      "id",
+      "tweetId",
+      "replyText",
+      "originalTweetText",
+      "score",
+      "ranking",
+      "jobid",
+      "tweetlink",
+    ];
+
+    const escapeCSV = (value: any) => {
+      if (value === null || value === undefined) return "";
+      const str = String(value);
+      // Escape double quotes by doubling them
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
     const rows = data.map((row) =>
       headers
-        .map((header) => {
-          let value: string | number | undefined | null;
-          value = row[header as keyof ProcessedResult];
-          return `"${value || ""}"`;
-        })
+        .map((header) => escapeCSV(row[header as keyof ProcessedResult]))
         .join(",")
     );
 
@@ -392,12 +438,14 @@ const TweetRankerApp: React.FC = () => {
               <div className="flex items-start gap-3">
                 <CheckCircle className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
                 <div className="flex-1">
-                  <p className="text-sm font-medium text-blue-800">Job Submitted Successfully</p>
+                  <p className="text-sm font-medium text-blue-800">
+                    Job Submitted Successfully
+                  </p>
                   <p className="text-sm text-blue-700 mt-1">Job ID: {jobId}</p>
                   <p className="text-xs text-blue-600 mt-1">
-                    {polling 
-                      ? "Auto-polling for results every 3 seconds. Waiting for data to become available..." 
-                      : "Your request is being processed. Click \"Get Results\" to check if it's ready."}
+                    {polling
+                      ? "Auto-polling for results every 3 seconds. Waiting for data to become available..."
+                      : 'Your request is being processed. Click "Get Results" to check if it\'s ready.'}
                   </p>
                 </div>
                 {polling && (
@@ -508,20 +556,36 @@ const TweetRankerApp: React.FC = () => {
             {summary && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                 <div className="bg-blue-50 rounded-lg p-4 text-center">
-                  <p className="text-sm font-medium text-blue-600">Total Processed</p>
-                  <p className="text-2xl font-bold text-blue-800">{summary.totalProcessed}</p>
+                  <p className="text-sm font-medium text-blue-600">
+                    Total Processed
+                  </p>
+                  <p className="text-2xl font-bold text-blue-800">
+                    {summary.totalProcessed}
+                  </p>
                 </div>
                 <div className="bg-green-50 rounded-lg p-4 text-center">
-                  <p className="text-sm font-medium text-green-600">Highest Score</p>
-                  <p className="text-2xl font-bold text-green-800">{summary.highestScore}/10</p>
+                  <p className="text-sm font-medium text-green-600">
+                    Highest Score
+                  </p>
+                  <p className="text-2xl font-bold text-green-800">
+                    {summary.highestScore}/10
+                  </p>
                 </div>
                 <div className="bg-yellow-50 rounded-lg p-4 text-center">
-                  <p className="text-sm font-medium text-yellow-600">Average Score</p>
-                  <p className="text-2xl font-bold text-yellow-800">{summary.averageScore.toFixed(1)}/10</p>
+                  <p className="text-sm font-medium text-yellow-600">
+                    Average Score
+                  </p>
+                  <p className="text-2xl font-bold text-yellow-800">
+                    {summary.averageScore.toFixed(1)}/10
+                  </p>
                 </div>
                 <div className="bg-red-50 rounded-lg p-4 text-center">
-                  <p className="text-sm font-medium text-red-600">Lowest Score</p>
-                  <p className="text-2xl font-bold text-red-800">{summary.lowestScore}/10</p>
+                  <p className="text-sm font-medium text-red-600">
+                    Lowest Score
+                  </p>
+                  <p className="text-2xl font-bold text-red-800">
+                    {summary.lowestScore}/10
+                  </p>
                 </div>
               </div>
             )}
@@ -551,15 +615,17 @@ const TweetRankerApp: React.FC = () => {
                       key={idx}
                       className="border-b border-gray-100 hover:bg-gray-50"
                     >
-                      <td className="py-3 px-4 text-gray-600">{row.tweetId || `Item ${idx + 1}`}</td>
+                      <td className="py-3 px-4 text-gray-600">
+                        {row.tweetId || `Item ${idx + 1}`}
+                      </td>
                       <td className="py-3 px-4 text-gray-800 max-w-md truncate">
                         {row.replyText}
                       </td>
                       <td className="py-3 px-4 text-gray-600">
                         {row.tweetlink ? (
-                          <a 
-                            href={row.tweetlink} 
-                            target="_blank" 
+                          <a
+                            href={row.tweetlink}
+                            target="_blank"
                             rel="noopener noreferrer"
                             className="text-blue-600 hover:text-blue-800 underline"
                           >
@@ -572,10 +638,13 @@ const TweetRankerApp: React.FC = () => {
                       <td className="py-3 px-4">
                         {(() => {
                           const rawScore = row.score || row.ranking || 0;
-                          const score = typeof rawScore === 'string' ? parseInt(rawScore) : rawScore;
+                          const score =
+                            typeof rawScore === "string"
+                              ? parseInt(rawScore)
+                              : rawScore;
                           let bgColor = "bg-gray-100";
                           let textColor = "text-gray-800";
-                          
+
                           if (score >= 8) {
                             bgColor = "bg-green-100";
                             textColor = "text-green-800";
@@ -589,9 +658,11 @@ const TweetRankerApp: React.FC = () => {
                             bgColor = "bg-red-100";
                             textColor = "text-red-800";
                           }
-                          
+
                           return (
-                            <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${bgColor} ${textColor}`}>
+                            <span
+                              className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${bgColor} ${textColor}`}
+                            >
                               {score}/10
                             </span>
                           );
@@ -619,8 +690,14 @@ const TweetRankerApp: React.FC = () => {
               Upload your CSV file containing tweet data with tweetId column
             </li>
             <li>Click "Submit Analysis Job" to start processing</li>
-            <li>Wait for job confirmation, then click "Get Results" - auto-polling will start if results aren't ready</li>
-            <li>The system will automatically check for results every 3 seconds until complete</li>
+            <li>
+              Wait for job confirmation, then click "Get Results" - auto-polling
+              will start if results aren't ready
+            </li>
+            <li>
+              The system will automatically check for results every 3 seconds
+              until complete
+            </li>
             <li>Download the results with rankings when ready</li>
           </ol>
         </div>
