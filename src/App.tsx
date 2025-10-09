@@ -59,7 +59,7 @@ const TweetRankerApp: React.FC = () => {
 
   // Add your results endpoint URL here
   const RESULTS_URL: string =
-    "https://n8n.elcarainternal.lol/webhook-test/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
+    "https://n8n.elcarainternal.lol/webhook/5a83a88a-1072-4c52-8144-fbb9eaaf4d53/results"; // Update with actual URL
 
   // Cleanup polling on unmount
   useEffect(() => {
