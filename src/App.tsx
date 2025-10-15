@@ -13,7 +13,7 @@ interface CSVRow {
 }
 
 interface ProcessedResult {
-  url: any;
+  url?: string | null;
   id: number;
   createdAt: string;
   updatedAt: string;
@@ -48,6 +48,9 @@ const TweetRankerApp: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [jobIds, setJobIds] = useState<string[]>([]);
+  const [completedJobIds, setCompletedJobIds] = useState<Set<string>>(new Set());
+  const [totalBatches, setTotalBatches] = useState<number>(0);
   const [jobSubmitted, setJobSubmitted] = useState<boolean>(false);
   const [fetchingResults, setFetchingResults] = useState<boolean>(false);
   const [polling, setPolling] = useState<boolean>(false);
@@ -80,7 +83,10 @@ const TweetRankerApp: React.FC = () => {
       setError(null);
       setResults(null);
       setSummary(null);
-      setJobId(null);
+    setJobId(null);
+    setJobIds([]);
+    setCompletedJobIds(new Set());
+    setTotalBatches(0);
       setJobSubmitted(false);
     } else {
       setError("Please select a valid CSV file");
@@ -116,6 +122,9 @@ const TweetRankerApp: React.FC = () => {
     setProgress(0);
     setSummary(null);
     setJobId(null);
+    setJobIds([]);
+    setCompletedJobIds(new Set());
+    setTotalBatches(0);
     setJobSubmitted(false);
 
     try {
@@ -123,39 +132,53 @@ const TweetRankerApp: React.FC = () => {
       const text = await file.text();
       const csvData = parseCSV(text);
 
-      setProgress(25);
+      console.log("Preparing CSV with", csvData.length, "rows for batching...");
+      setProgress(10);
 
-      console.log("Sending data:", csvData); // Debug log
+      // Chunk into batches of 50
+      const chunkSize = 50;
+      const chunks: CSVRow[][] = [];
+      for (let i = 0; i < csvData.length; i += chunkSize) {
+        chunks.push(csvData.slice(i, i + chunkSize));
+      }
+      setTotalBatches(chunks.length);
 
-      // Submit job to n8n workflow
-      const response = await fetch(WEBHOOK_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          items: csvData,
-          filename: file.name,
-          totalRows: csvData.length,
-        }),
-      });
+      const collectedJobIds: string[] = [];
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const batch = chunks[idx];
+        const response = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: batch,
+            filename: file.name,
+            totalRows: batch.length,
+            batchIndex: idx,
+            totalBatches: chunks.length,
+          }),
+        });
 
-      setProgress(75);
+        if (!response.ok) {
+          throw new Error(`Server error (batch ${idx + 1}/${chunks.length}): ${response.status}`);
+        }
 
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
+        const data: JobResponse = await response.json();
+        if (!data.jobId) {
+          throw new Error(`No job ID received from server for batch ${idx + 1}`);
+        }
+        collectedJobIds.push(data.jobId);
+
+        // Update submission progress up to 95%
+        const base = 10;
+        const submitPortion = 85;
+        const submitProgress = Math.round(base + (submitPortion * (idx + 1)) / chunks.length);
+        setProgress(Math.min(submitProgress, 95));
       }
 
-      const data: JobResponse = await response.json();
-      console.log("Received job response:", data); // Debug log
-
-      if (data.jobId) {
-        setJobId(data.jobId);
-        setJobSubmitted(true);
-        setProgress(100);
-      } else {
-        throw new Error("No job ID received from server");
-      }
+      setJobIds(collectedJobIds);
+      setJobId(collectedJobIds[0] ?? null);
+      setJobSubmitted(true);
+      setProgress(100);
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "An unknown error occurred";
@@ -181,7 +204,8 @@ const TweetRankerApp: React.FC = () => {
   const checkResults = async (
     isAutoPolling: boolean = false
   ): Promise<boolean> => {
-    if (!jobId) {
+    const pendingJobIds = jobIds.length > 0 ? jobIds : (jobId ? [jobId] : []);
+    if (pendingJobIds.length === 0) {
       setError("No job ID available");
       return false;
     }
@@ -192,116 +216,133 @@ const TweetRankerApp: React.FC = () => {
     }
 
     try {
-      // Fetch results using job ID
-      const response = await fetch(`${RESULTS_URL}/${jobId}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
+      // For multi-batch: query all pending jobs that are not completed yet
+      const currentCompleted = new Set(completedJobIds);
 
-      if (!response.ok) {
-        if (response.status === 404) {
-          if (!isAutoPolling) {
-            // Don't show error, just start polling
-            startPolling();
-          }
-          return false; // Still processing
-        }
-        throw new Error(`Server error: ${response.status}`);
+      const jobsToQuery = pendingJobIds.filter((id) => !currentCompleted.has(id));
+      if (jobsToQuery.length === 0) {
+        // All jobs already completed
+        return true;
       }
 
-      // Check if response has content before trying to parse JSON
-      const responseText = await response.text();
-      if (!responseText || responseText.trim() === "") {
-        console.log("Empty response, continuing to poll...");
-        if (!isAutoPolling) {
-          startPolling();
-        }
-        return false; // No data yet, continue polling
-      }
+      let newResults: ProcessedResult[] = [];
+      let anyProcessing = false;
 
-      let rawData;
-      try {
-        rawData = JSON.parse(responseText);
-      } catch (parseError) {
-        console.log("Failed to parse JSON, response text:", responseText);
-        if (!isAutoPolling) {
-          startPolling();
-        }
-        return false; // Invalid JSON, continue polling
-      }
-
-      console.log("Received results:", rawData); // Debug log
-
-      // Handle array wrapper - the response comes as an array with one object
-      let data: WebhookResponse;
-      if (Array.isArray(rawData) && rawData.length > 0) {
-        data = rawData[0];
-      } else if (rawData && typeof rawData === "object") {
-        data = rawData;
-      } else {
-        console.log("Unexpected response format:", rawData);
-        return false;
-      }
-
-      // Check status
-      if (data.status === "processing") {
-        if (!isAutoPolling) {
-          // Don't show error, just start polling
-          startPolling();
-        }
-        return false;
-      }
-
-      if (data.status === "done") {
-        if (data.results && data.results.length > 0) {
-          // Process results
-          const processedResults = data.results
-            .map((result) => ({
-              ...result,
-              ranking:
-                typeof result.score === "string"
-                  ? parseInt(result.score)
-                  : result.score,
-            }))
-            .sort((a, b) => {
-              const scoreA =
-                typeof a.score === "string" ? parseInt(a.score) : a.score;
-              const scoreB =
-                typeof b.score === "string" ? parseInt(b.score) : b.score;
-              return scoreB - scoreA;
+      // Fetch all in parallel
+      const responses = await Promise.all(
+        jobsToQuery.map(async (id) => {
+          try {
+            const resp = await fetch(`${RESULTS_URL}/${id}`, {
+              method: "GET",
+              headers: { "Content-Type": "application/json" },
             });
+            if (!resp.ok) {
+              if (resp.status === 404) {
+                // Not ready yet
+                anyProcessing = true;
+                return null;
+              }
+              throw new Error(`Server error: ${resp.status}`);
+            }
 
-          setResults(processedResults);
+            const text = await resp.text();
+            if (!text || text.trim() === "") {
+              anyProcessing = true;
+              return null;
+            }
+            let payload: any;
+            try {
+              payload = JSON.parse(text);
+            } catch {
+              anyProcessing = true;
+              return null;
+            }
 
-          // Calculate summary
-          const scores = processedResults.map((r) =>
-            typeof r.score === "string" ? parseInt(r.score) : r.score
-          );
-          setSummary({
-            totalProcessed: processedResults.length,
-            averageScore:
-              scores.reduce((sum, score) => sum + score, 0) / scores.length,
-            highestScore: Math.max(...scores),
-            lowestScore: Math.min(...scores),
-          });
+            const data: WebhookResponse = Array.isArray(payload) && payload.length > 0 ? payload[0] : payload;
+            if (!data || typeof data !== "object") {
+              anyProcessing = true;
+              return null;
+            }
 
-          // Stop polling if it was running
-          if (isAutoPolling) {
-            stopPolling();
+            if (data.status === "processing") {
+              anyProcessing = true;
+              return null;
+            }
+
+            if (data.status === "done" && Array.isArray(data.results) && data.results.length > 0) {
+              // Mark job complete and collect results
+              currentCompleted.add(id);
+              return data.results as ProcessedResult[];
+            }
+
+            // No results yet
+            anyProcessing = true;
+            return null;
+          } catch (e) {
+            console.error(`Error fetching results for job ${id}:`, e);
+            anyProcessing = true;
+            return null;
           }
-          return true;
-        } else {
-          // No results available yet, continue polling
-          if (!isAutoPolling) {
-            startPolling();
-          }
-          return false;
+        })
+      );
+
+      // Merge collected results
+      for (const arr of responses) {
+        if (Array.isArray(arr)) {
+          newResults = newResults.concat(arr);
         }
       }
 
-      return false;
+      if (newResults.length > 0) {
+        // Process, merge, sort and set
+        const processedNew = newResults.map((result) => ({
+          ...result,
+          ranking:
+            typeof result.score === "string" ? parseInt(result.score) : result.score,
+        }));
+
+        setResults((prev) => {
+          const combined = [...(prev ?? []), ...processedNew];
+          // Deduplicate by id if available, else by tweetId+replyText
+          const seen = new Set<string | number>();
+          const deduped: ProcessedResult[] = [];
+          for (const item of combined) {
+            const key = (item.id as unknown as string) ?? `${item.tweetId}:${item.replyText}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              deduped.push(item);
+            }
+          }
+          deduped.sort((a, b) => {
+            const scoreA = typeof a.score === "string" ? parseInt(a.score) : a.score;
+            const scoreB = typeof b.score === "string" ? parseInt(b.score) : b.score;
+            return (scoreB || 0) - (scoreA || 0);
+          });
+          // Update summary too
+          if (deduped.length > 0) {
+            const scores = deduped.map((r) => (typeof r.score === "string" ? parseInt(r.score) : r.score) || 0);
+            setSummary({
+              totalProcessed: deduped.length,
+              averageScore: scores.reduce((sum, s) => sum + s, 0) / scores.length,
+              highestScore: Math.max(...scores),
+              lowestScore: Math.min(...scores),
+            });
+          }
+          return deduped;
+        });
+      }
+
+      // Persist completed job IDs
+      setCompletedJobIds(new Set(currentCompleted));
+
+      const allDone = currentCompleted.size === pendingJobIds.length;
+      if (allDone && isAutoPolling) {
+        stopPolling();
+      } else if (!isAutoPolling && !allDone) {
+        // Kick off polling if user-initiated and not complete yet
+        startPolling();
+      }
+      return allDone && !anyProcessing;
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "An unknown error occurred";
@@ -327,13 +368,13 @@ const TweetRankerApp: React.FC = () => {
   const startPolling = () => {
     setPolling(true);
     setFetchingResults(true);
-    const interval = setInterval(async () => {
+    const interval = window.setInterval(async () => {
       const isDone = await checkResults(true);
       if (isDone) {
         clearInterval(interval);
         setPollingInterval(null);
       }
-    }, 3000); // Poll every 3 seconds
+    }, 3000);
     setPollingInterval(interval);
   };
 
@@ -344,7 +385,6 @@ const TweetRankerApp: React.FC = () => {
       startPolling();
     }
   };
-
   const downloadResults = (): void => {
     if (!results) return;
 
@@ -369,7 +409,7 @@ const TweetRankerApp: React.FC = () => {
       "score",
       "ranking",
       "jobid",
-      "tweetlink",
+      "url",
     ];
 
     const escapeCSV = (value: any) => {
@@ -433,7 +473,7 @@ const TweetRankerApp: React.FC = () => {
           </div>
 
           {/* Job Status */}
-          {jobSubmitted && jobId && (
+          {jobSubmitted && (jobId || jobIds.length > 0) && (
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="flex items-start gap-3">
                 <CheckCircle className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
@@ -441,7 +481,16 @@ const TweetRankerApp: React.FC = () => {
                   <p className="text-sm font-medium text-blue-800">
                     Job Submitted Successfully
                   </p>
-                  <p className="text-sm text-blue-700 mt-1">Job ID: {jobId}</p>
+                  {jobIds.length > 1 ? (
+                    <>
+                      <p className="text-sm text-blue-700 mt-1">Batches: {jobIds.length}</p>
+                      <p className="text-xs text-blue-600 mt-1">
+                        Completed {completedJobIds.size}/{totalBatches || jobIds.length} batches
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-sm text-blue-700 mt-1">Job ID: {jobId}</p>
+                  )}
                   <p className="text-xs text-blue-600 mt-1">
                     {polling
                       ? "Auto-polling for results every 3 seconds. Waiting for data to become available..."
